@@ -11,7 +11,8 @@ import (
 )
 
 var (
-	AlreadyClosing = errors.New("The consumer group is already shutting down.")
+	AlreadyClosing    = errors.New("The consumer group is already shutting down.")
+	TopicChanNotFound = errors.New("Topic Channel not found")
 )
 
 type Config struct {
@@ -72,9 +73,12 @@ type ConsumerGroup struct {
 	wg             sync.WaitGroup
 	singleShutdown sync.Once
 
-	messages chan *sarama.ConsumerMessage
-	errors   chan *sarama.ConsumerError
-	stopper  chan struct{}
+	//messages chan *sarama.ConsumerMessage
+	// message channel per topic
+	messageChans map[string]chan *sarama.ConsumerMessage
+	errorChans   map[string]chan *sarama.ConsumerError
+	//errors       chan *sarama.ConsumerError
+	stopper chan struct{}
 
 	consumers kazoo.ConsumergroupInstanceList
 
@@ -134,9 +138,17 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 		group:    group,
 		instance: instance,
 
-		messages: make(chan *sarama.ConsumerMessage, config.ChannelBufferSize),
-		errors:   make(chan *sarama.ConsumerError, config.ChannelBufferSize),
-		stopper:  make(chan struct{}),
+		//messages: make(chan *sarama.ConsumerMessage, config.ChannelBufferSize),
+		messageChans: map[string]chan *sarama.ConsumerMessage{},
+		errorChans:   map[string]chan *sarama.ConsumerError{},
+		//errors:       make(chan *sarama.ConsumerError, config.ChannelBufferSize),
+		stopper: make(chan struct{}),
+	}
+
+	// init message channels for each topic
+	for _, topic := range topics {
+		cg.messageChans[topic] = make(chan *sarama.ConsumerMessage, config.ChannelBufferSize)
+		cg.errorChans[topic] = make(chan *sarama.ConsumerError, config.ChannelBufferSize)
 	}
 
 	// Register consumer group
@@ -171,14 +183,49 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 	return
 }
 
+/*
 // Returns a channel that you can read to obtain events from Kafka to process.
 func (cg *ConsumerGroup) Messages() <-chan *sarama.ConsumerMessage {
-	return cg.messages
+	messages := make(chan *sarama.ConsumerMessage, config.ChannelBufferSize)
+	for _, messageChan := range cg.messageChans {
+
+	}
+}
+*/
+
+func (cg *ConsumerGroup) MessagesByTopic(topic string) (<-chan *sarama.ConsumerMessage, error) {
+	return cg.getMessageChanByTopic(topic)
 }
 
+func (cg *ConsumerGroup) getMessageChanByTopic(topic string) (chan *sarama.ConsumerMessage, error) {
+	messageChan, found := cg.messageChans[topic]
+	if !found {
+		cg.Logf("message channel not found for topic %s\n", topic)
+		return nil, TopicChanNotFound
+	}
+
+	return messageChan, nil
+}
+
+/*
 // Returns a channel that you can read to obtain events from Kafka to process.
 func (cg *ConsumerGroup) Errors() <-chan *sarama.ConsumerError {
 	return cg.errors
+}
+*/
+
+func (cg *ConsumerGroup) getErrorChanByTopic(topic string) (chan *sarama.ConsumerError, error) {
+	errorChan, found := cg.errorChans[topic]
+	if !found {
+		cg.Logf("error channel not found for topic %s\n", topic)
+		return nil, TopicChanNotFound
+	}
+
+	return errorChan, nil
+}
+
+func (cg *ConsumerGroup) ErrorsByTopic(topic string) (<-chan *sarama.ConsumerError, error) {
+	return cg.getErrorChanByTopic(topic)
 }
 
 func (cg *ConsumerGroup) Closed() bool {
@@ -209,8 +256,14 @@ func (cg *ConsumerGroup) Close() error {
 			cg.Logf("FAILED closing the Sarama client: %s\n", shutdownError)
 		}
 
-		close(cg.messages)
-		close(cg.errors)
+		//close(cg.messages)
+		for _, messageChan := range cg.messageChans {
+			close(messageChan)
+		}
+		//close(cg.errors)
+		for _, errorChan := range cg.errorChans {
+			close(errorChan)
+		}
 		cg.instance = nil
 	})
 
@@ -256,8 +309,19 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 		stopper := make(chan struct{})
 
 		for _, topic := range topics {
+
+			messageChan, err := cg.getMessageChanByTopic(topic)
+			if err != nil {
+				continue
+			}
+
+			errorChan, err := cg.getErrorChanByTopic(topic)
+			if err != nil {
+				continue
+			}
+
 			cg.wg.Add(1)
-			go cg.topicConsumer(topic, cg.messages, cg.errors, stopper)
+			go cg.topicConsumer(topic, messageChan, errorChan, stopper)
 		}
 
 		select {
@@ -288,7 +352,7 @@ func (cg *ConsumerGroup) topicConsumer(topic string, messages chan<- *sarama.Con
 	partitions, err := cg.kazoo.Topic(topic).Partitions()
 	if err != nil {
 		cg.Logf("%s :: FAILED to get list of partitions: %s\n", topic, err)
-		cg.errors <- &sarama.ConsumerError{
+		errors <- &sarama.ConsumerError{
 			Topic:     topic,
 			Partition: -1,
 			Err:       err,
@@ -299,7 +363,7 @@ func (cg *ConsumerGroup) topicConsumer(topic string, messages chan<- *sarama.Con
 	partitionLeaders, err := retrievePartitionLeaders(partitions)
 	if err != nil {
 		cg.Logf("%s :: FAILED to get leaders of partitions: %s\n", topic, err)
-		cg.errors <- &sarama.ConsumerError{
+		errors <- &sarama.ConsumerError{
 			Topic:     topic,
 			Partition: -1,
 			Err:       err,
