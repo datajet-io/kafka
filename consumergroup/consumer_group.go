@@ -383,6 +383,23 @@ func (cg *ConsumerGroup) topicConsumer(topic string, messages chan<- *sarama.Con
 		go cg.partitionConsumer(topic, pid.ID, messages, errors, &wg, stopper)
 	}
 
+	// check for other partition
+	time.Sleep(6 * time.Second)
+	for cgInstanceID, partitionList := range dividedPartitions {
+		if cgInstanceID == cg.instance.ID {
+			continue
+		}
+
+		for _, partition := range partitionList {
+			instanceID, err := cg.group.PartitionOwner(topic, partition.ID)
+			if err == nil && instanceID == nil {
+				// this partition still not claimed
+				wg.Add(1)
+				go cg.partitionConsumer(topic, partition.ID, messages, errors, &wg, stopper)
+			}
+		}
+	}
+
 	wg.Wait()
 	cg.Logf("%s :: Stopped topic consumer\n", topic)
 }
