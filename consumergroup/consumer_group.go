@@ -76,8 +76,8 @@ type ConsumerGroup struct {
 	//messages chan *sarama.ConsumerMessage
 	// message channel per topic
 	messageChans map[string]chan *sarama.ConsumerMessage
-	errorChans   map[string]chan *sarama.ConsumerError
-	//errors       chan *sarama.ConsumerError
+	//errorChans   map[string]chan *sarama.ConsumerError
+	errors  chan *sarama.ConsumerError
 	stopper chan struct{}
 
 	consumers kazoo.ConsumergroupInstanceList
@@ -140,15 +140,15 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 
 		//messages: make(chan *sarama.ConsumerMessage, config.ChannelBufferSize),
 		messageChans: map[string]chan *sarama.ConsumerMessage{},
-		errorChans:   map[string]chan *sarama.ConsumerError{},
-		//errors:       make(chan *sarama.ConsumerError, config.ChannelBufferSize),
+		//errorChans:   map[string]chan *sarama.ConsumerError{},
+		errors:  make(chan *sarama.ConsumerError, config.ChannelBufferSize),
 		stopper: make(chan struct{}),
 	}
 
 	// init message channels for each topic
 	for _, topic := range topics {
 		cg.messageChans[topic] = make(chan *sarama.ConsumerMessage, config.ChannelBufferSize)
-		cg.errorChans[topic] = make(chan *sarama.ConsumerError, config.ChannelBufferSize)
+		//cg.errorChans[topic] = make(chan *sarama.ConsumerError, config.ChannelBufferSize)
 	}
 
 	// Register consumer group
@@ -207,13 +207,12 @@ func (cg *ConsumerGroup) getMessageChanByTopic(topic string) (chan *sarama.Consu
 	return messageChan, nil
 }
 
-/*
 // Returns a channel that you can read to obtain events from Kafka to process.
 func (cg *ConsumerGroup) Errors() <-chan *sarama.ConsumerError {
 	return cg.errors
 }
-*/
 
+/*
 func (cg *ConsumerGroup) getErrorChanByTopic(topic string) (chan *sarama.ConsumerError, error) {
 	errorChan, found := cg.errorChans[topic]
 	if !found {
@@ -227,6 +226,7 @@ func (cg *ConsumerGroup) getErrorChanByTopic(topic string) (chan *sarama.Consume
 func (cg *ConsumerGroup) ErrorsByTopic(topic string) (<-chan *sarama.ConsumerError, error) {
 	return cg.getErrorChanByTopic(topic)
 }
+*/
 
 func (cg *ConsumerGroup) Closed() bool {
 	return cg.instance == nil
@@ -261,9 +261,11 @@ func (cg *ConsumerGroup) Close() error {
 			close(messageChan)
 		}
 		//close(cg.errors)
-		for _, errorChan := range cg.errorChans {
-			close(errorChan)
-		}
+		/*
+			for _, errorChan := range cg.errorChans {
+				close(errorChan)
+			}
+		*/
 		cg.instance = nil
 	})
 
@@ -303,6 +305,25 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 			return
 		}
 
+		// if get empty consumer list
+		for retry := 3; len(consumers) == 0 && retry > 0; retry-- {
+			// first try to register itself again
+			if err := cg.instance.Register(topics); err != nil {
+				cg.Logf("FAILED to register consumer instance: %s!\n", err)
+				continue
+			}
+			consumers, consumerChanges, err = cg.group.WatchInstances()
+			if err != nil {
+				cg.Logf("FAILED to get list of registered consumer instances: %s\n", err)
+				continue
+			}
+		}
+
+		if len(consumers) == 0 {
+			cg.errors <- &sarama.ConsumerError{Err: ErrEmptyCustomerList}
+			return
+		}
+
 		cg.consumers = consumers
 		cg.Logf("Currently registered consumers: %d\n", len(cg.consumers))
 
@@ -315,13 +336,15 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 				continue
 			}
 
-			errorChan, err := cg.getErrorChanByTopic(topic)
-			if err != nil {
-				continue
-			}
+			/*
+				errorChan, err := cg.getErrorChanByTopic(topic)
+				if err != nil {
+					continue
+				}
+			*/
 
 			cg.wg.Add(1)
-			go cg.topicConsumer(topic, messageChan, errorChan, stopper)
+			go cg.topicConsumer(topic, messageChan, cg.errors, stopper)
 		}
 
 		select {
