@@ -4,4 +4,4 @@ import (
 	"errors"
 )
 
-var ErrEmptyCustomerList = errors.New("get empty cusomer list from zookeeper")
+var ErrEmptyConsumerList = errors.New("get empty consumer list from zookeeper")

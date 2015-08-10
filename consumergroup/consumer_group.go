@@ -212,22 +212,6 @@ func (cg *ConsumerGroup) Errors() <-chan *sarama.ConsumerError {
 	return cg.errors
 }
 
-/*
-func (cg *ConsumerGroup) getErrorChanByTopic(topic string) (chan *sarama.ConsumerError, error) {
-	errorChan, found := cg.errorChans[topic]
-	if !found {
-		cg.Logf("error channel not found for topic %s\n", topic)
-		return nil, TopicChanNotFound
-	}
-
-	return errorChan, nil
-}
-
-func (cg *ConsumerGroup) ErrorsByTopic(topic string) (<-chan *sarama.ConsumerError, error) {
-	return cg.getErrorChanByTopic(topic)
-}
-*/
-
 func (cg *ConsumerGroup) Closed() bool {
 	return cg.instance == nil
 }
@@ -260,12 +244,7 @@ func (cg *ConsumerGroup) Close() error {
 		for _, messageChan := range cg.messageChans {
 			close(messageChan)
 		}
-		//close(cg.errors)
-		/*
-			for _, errorChan := range cg.errorChans {
-				close(errorChan)
-			}
-		*/
+		close(cg.errors)
 		cg.instance = nil
 	})
 
@@ -320,7 +299,7 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 		}
 
 		if len(consumers) == 0 {
-			cg.errors <- &sarama.ConsumerError{Err: ErrEmptyCustomerList}
+			cg.errors <- &sarama.ConsumerError{Err: ErrEmptyConsumerList}
 			return
 		}
 
@@ -335,13 +314,6 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 			if err != nil {
 				continue
 			}
-
-			/*
-				errorChan, err := cg.getErrorChanByTopic(topic)
-				if err != nil {
-					continue
-				}
-			*/
 
 			cg.wg.Add(1)
 			go cg.topicConsumer(topic, messageChan, cg.errors, stopper)
