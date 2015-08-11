@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wvanbergen/kazoo-go"
+	"github.com/datajet-io/kazoo-go"
 	"gopkg.in/Shopify/sarama.v1"
 )
 

@@ -1,7 +1,7 @@
 package consumergroup
 
 import (
-	"github.com/wvanbergen/kazoo-go"
+	"github.com/datajet-io/kazoo-go"
 	"testing"
 )
 

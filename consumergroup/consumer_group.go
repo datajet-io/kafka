@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wvanbergen/kazoo-go"
+	"github.com/datajet-io/kazoo-go"
 	"gopkg.in/Shopify/sarama.v1"
 )
 
@@ -281,6 +281,7 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 		consumers, consumerChanges, err := cg.group.WatchInstances()
 		if err != nil {
 			cg.Logf("FAILED to get list of registered consumer instances: %s\n", err)
+			cg.errors <- &sarama.ConsumerError{Err: ErrGetConsumerList}
 			return
 		}
 
@@ -289,11 +290,13 @@ func (cg *ConsumerGroup) topicListConsumer(topics []string) {
 			// first try to register itself again
 			if err := cg.instance.Register(topics); err != nil {
 				cg.Logf("FAILED to register consumer instance: %s!\n", err)
+				cg.errors <- &sarama.ConsumerError{Err: ErrRegisterConsumer}
 				continue
 			}
 			consumers, consumerChanges, err = cg.group.WatchInstances()
 			if err != nil {
 				cg.Logf("FAILED to get list of registered consumer instances: %s\n", err)
+				cg.errors <- &sarama.ConsumerError{Err: ErrGetConsumerList}
 				continue
 			}
 		}
