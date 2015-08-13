@@ -75,6 +75,7 @@ type ConsumerGroup struct {
 
 	//messages chan *sarama.ConsumerMessage
 	// message channel per topic
+	mu           sync.Mutex
 	messageChans map[string]chan *sarama.ConsumerMessage
 	//errorChans   map[string]chan *sarama.ConsumerError
 	errors  chan *sarama.ConsumerError
@@ -85,15 +86,10 @@ type ConsumerGroup struct {
 	offsetManager OffsetManager
 }
 
-// Connects to a consumer group, using Zookeeper for auto-discovery
-func JoinConsumerGroup(name string, topics []string, zookeeper []string, config *Config) (cg *ConsumerGroup, err error) {
+func NewConsumerGroup(name string, zookeeper []string, config *Config) (cg *ConsumerGroup, err error) {
 
 	if name == "" {
 		return nil, sarama.ConfigurationError("Empty consumergroup name")
-	}
-
-	if len(topics) == 0 {
-		return nil, sarama.ConfigurationError("No topics provided")
 	}
 
 	if len(zookeeper) == 0 {
@@ -140,42 +136,65 @@ func JoinConsumerGroup(name string, topics []string, zookeeper []string, config 
 
 		//messages: make(chan *sarama.ConsumerMessage, config.ChannelBufferSize),
 		messageChans: map[string]chan *sarama.ConsumerMessage{},
-		//errorChans:   map[string]chan *sarama.ConsumerError{},
-		errors:  make(chan *sarama.ConsumerError, config.ChannelBufferSize),
-		stopper: make(chan struct{}),
+		errors:       make(chan *sarama.ConsumerError, config.ChannelBufferSize),
+		stopper:      make(chan struct{}),
+	}
+
+	return
+}
+
+// Connects to a consumer group, using Zookeeper for auto-discovery
+func JoinConsumerGroup(name string, topics []string, zookeeper []string, config *Config) (cg *ConsumerGroup, err error) {
+
+	cg, err = NewConsumerGroup(name, zookeeper, config)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := cg.Start(topics); err != nil {
+		return nil, err
+	}
+
+	return
+}
+
+// Start kafka consumer
+func (cg *ConsumerGroup) Start(topics []string) (err error) {
+
+	if len(topics) == 0 {
+		return sarama.ConfigurationError("No topics provided")
 	}
 
 	// init message channels for each topic
 	for _, topic := range topics {
-		cg.messageChans[topic] = make(chan *sarama.ConsumerMessage, config.ChannelBufferSize)
-		//cg.errorChans[topic] = make(chan *sarama.ConsumerError, config.ChannelBufferSize)
+		cg.getMessageChanByTopic(topic)
 	}
 
 	// Register consumer group
 	if exists, err := cg.group.Exists(); err != nil {
 		cg.Logf("FAILED to check for existence of consumergroup: %s!\n", err)
-		_ = consumer.Close()
-		_ = kz.Close()
-		return nil, err
+		_ = cg.consumer.Close()
+		_ = cg.kazoo.Close()
+		return err
 	} else if !exists {
 		cg.Logf("Consumergroup `%s` does not yet exists, creating...\n", cg.group.Name)
 		if err := cg.group.Create(); err != nil {
 			cg.Logf("FAILED to create consumergroup in Zookeeper: %s!\n", err)
-			_ = consumer.Close()
-			_ = kz.Close()
-			return nil, err
+			_ = cg.consumer.Close()
+			_ = cg.kazoo.Close()
+			return err
 		}
 	}
 
 	// Register itself with zookeeper
 	if err := cg.instance.Register(topics); err != nil {
 		cg.Logf("FAILED to register consumer instance: %s!\n", err)
-		return nil, err
+		return err
 	} else {
 		cg.Logf("Consumer instance registered (%s).", cg.instance.ID)
 	}
 
-	offsetConfig := OffsetManagerConfig{CommitInterval: config.Offsets.CommitInterval}
+	offsetConfig := OffsetManagerConfig{CommitInterval: cg.config.Offsets.CommitInterval}
 	cg.offsetManager = NewZookeeperOffsetManager(cg, &offsetConfig)
 
 	go cg.topicListConsumer(topics)
@@ -198,10 +217,13 @@ func (cg *ConsumerGroup) MessagesByTopic(topic string) (<-chan *sarama.ConsumerM
 }
 
 func (cg *ConsumerGroup) getMessageChanByTopic(topic string) (chan *sarama.ConsumerMessage, error) {
+	cg.mu.Lock()
+	defer cg.mu.Unlock()
+
 	messageChan, found := cg.messageChans[topic]
 	if !found {
-		cg.Logf("message channel not found for topic %s\n", topic)
-		return nil, TopicChanNotFound
+		messageChan = make(chan *sarama.ConsumerMessage, cg.config.ChannelBufferSize)
+		cg.messageChans[topic] = messageChan
 	}
 
 	return messageChan, nil
